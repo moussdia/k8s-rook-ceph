@@ -1,0 +1,1077 @@
+
+
+
+
+----------------------------------DEPLOIEMENT D'UN CLUSTER K8S ET ROOK--------------------------------
+
+
+
+-----------------------------DEPLOY CLUSTER KUBERNETES-------------------------------
+
+
+Virtualbox:
+3 VMs (1 Master et 2 Nodes)
+2Go RAM pour chaque VM
+30 Go HDD pour chaque VM
+20 Go + 20 Go supplémentaire pour chaque VM (dédié aux OSD)
+
+
+Outils:
+Ubuntu server 18.04 LTS
+Docker
+Kubernetes
+Calico
+Rook (operator)
+Ceph
+
+
+----Networking address----
+
+172.16.16.0/24 
+
+
+----changer les noms de chaque node (master, node-01, node-02)  ------
+
+root@master:sudo hostnamectl
+
+root@master:sudo hostnamectl set-hostname node-1
+
+root@node-01:sudo vi /etc/cloud/cloud.cfg
+# This will cause the set+update hostname module to not operate (if true)
+preserve_hostname: true
+
+root@ceph:sudo hostnamectl
+
+
+root@ceph:~# vi /etc/hosts  
+
+172.16.16.4   master
+172.16.16.5   node-01
+172.16.16.6   node-02
+
+
+
+-----modifier les address ip---
+
+root@ceph:/opt/ceph-ansible# vi /etc/netplan/50-cloud-init.yaml
+
+network:
+    ethernets:
+        enp0s3:
+            addresses: [172.16.16.4/24]
+            gateway4: 172.16.16.1
+            nameservers:
+                addresses: [172.16.16.1]
+            dhcp4: no
+
+        enp0s8:
+            dhcp4: no
+
+    version: 2
+
+
+root@ceph:~# ip link set enp0s3 down    (ou 'up')
+
+
+----Faire communiquer les noeuds par SSH----
+
+
+root@master:~# ssh-keygen -t rsa
+
+Generating public/private rsa key pair.
+Enter file in which to save the key (/root/.ssh/id_rsa):
+Enter passphrase (empty for no passphrase):
+Enter same passphrase again:
+Your identification has been saved in /root/.ssh/id_rsa.
+Your public key has been saved in /root/.ssh/id_rsa.pub.
+The key fingerprint is:
+SHA256:nycOwvtNu0gCJ/wLHJXI7TreT+MebZWzfNTPjGfa4iM root@master
+The key's randomart image is:
++---[RSA 2048]----+
+|                 |
+|   . o .         |
+|    o +          |
+|   . o       . . |
+|    = o S   + . .|
+|   . O   o + + +.|
+|    = = * B + o *|
+|   . + O X +E.o= |
+|    . ++* =. ooo.|
++----[SHA256]-----+
+
+
+root@master:~# ssh-copy-id node-01
+
+root@master:~# ssh-copy-id node-02
+
+
+----test de communication des noeuds----
+
+root@master:~# ssh node-01
+
+root@node-01:~# logout
+Connection to node-01 closed
+
+
+root@master:~# ssh node-02
+
+root@node-02:~# logout
+Connection to node-02 closed
+
+
+
+
+------------------Bac à sable à faire sur tous les noeuds-----------------
+
+Allez dans la documentation de kubernetes.io et tapez "install kubeadm" 
+
+
+root@master:~# nproc      (pour voir le nombre de cpu)
+2
+
+
+root@master:~# free -h  (pour voir la ram et le swap)
+              total        used        free      shared  buff/cache   available
+Mem:           1.9G        132M        1.4G        1.0M        408M        1.7G
+Swap:          2.0G          0B        2.0G
+
+
+root@master:~# swapon -s    (pour voir s'il y a une partition lié au swap)
+Filename                                Type            Size    Used    Priority
+/swap.img                               file            2097148 0       -2
+
+NB: on voit que le 'swap' est activé donc il faut le "désactiver"
+
+
+root@master:~# swapoff -a    (pour désactiver le swap)
+
+root@master:~# free -h
+              total        used        free      shared  buff/cache   available
+Mem:           1.9G        133M        1.4G        1.0M        408M        1.7G
+Swap:            0B          0B          0B
+
+NB: ici on voit que le "swap" est désactivé. Il faudra le faire sur chaque node du cluster
+
+
+
+root@master:~# cat /etc/os-release    (pour voir la version de l'OS)
+
+NAME="Ubuntu"
+VERSION="18.04 LTS (Bionic Beaver)"
+ID=ubuntu
+ID_LIKE=debian
+PRETTY_NAME="Ubuntu 18.04 LTS"
+VERSION_ID="18.04"
+HOME_URL="https://www.ubuntu.com/"
+SUPPORT_URL="https://help.ubuntu.com/"
+BUG_REPORT_URL="https://bugs.launchpad.net/ubuntu/"
+PRIVACY_POLICY_URL="https://www.ubuntu.com/legal/terms-and-policies/privacy-policy"
+VERSION_CODENAME=bionic
+UBUNTU_CODENAME=bionic
+
+
+
+root@node-02:~# grep -i cpu  /proc/cpuinfo         (pour voir le nombre de cpu)
+cpu family      : 6
+model name      : Intel(R) Core(TM) i5-8250U CPU @ 1.60GHz
+cpu MHz         : 1800.001
+cpu cores       : 1
+cpuid level     : 22
+
+
+root@node-02:~# grep -i mem /proc/meminfo           (pour voir le nombre de cpu)
+MemTotal:        1432716 kB
+MemFree:          133608 kB
+MemAvailable:     817236 kB
+
+
+
+
+--------Il faut permettre à "iptables" de voir le "bridge traffic" sur chaque noeud------
+
+root@node-02:~# lsmod | grep br_netfilter    (pour voir si le module 'netfilter' est chargé, 
+                                              le resultat nous dire que le module n'est pas chargé
+                                              donc il faudra charger)
+
+root@master:~# sudo modprobe br_netfilter  (pour charger le module 'netfilter')
+
+root@master:~# lsmod | grep br_netfilter
+br_netfilter           24576  0
+bridge                151552  1 br_netfilter
+
+
+root@master:~# cat <<EOF | sudo tee /etc/sysctl.d/k8s.conf
+net.bridge.bridge-nf-call-ip6tables = 1
+net.bridge.bridge-nf-call-iptables = 1
+EOF
+net.bridge.bridge-nf-call-ip6tables = 1
+net.bridge.bridge-nf-call-iptables = 1
+
+
+root@master:~# sudo sysctl --system   (pour rendre les paramètres persistant au démarrage)
+
+* Applying /etc/sysctl.d/10-console-messages.conf ...
+kernel.printk = 4 4 1 7
+* Applying /etc/sysctl.d/10-ipv6-privacy.conf ...
+* Applying /etc/sysctl.d/10-kernel-hardening.conf ...
+kernel.kptr_restrict = 1
+* Applying /etc/sysctl.d/10-link-restrictions.conf ...
+fs.protected_hardlinks = 1
+fs.protected_symlinks = 1
+* Applying /etc/sysctl.d/10-lxd-inotify.conf ...
+fs.inotify.max_user_instances = 1024
+* Applying /etc/sysctl.d/10-magic-sysrq.conf ...
+kernel.sysrq = 176
+* Applying /etc/sysctl.d/10-network-security.conf ...
+net.ipv4.conf.default.rp_filter = 1
+net.ipv4.conf.all.rp_filter = 1
+net.ipv4.tcp_syncookies = 1
+* Applying /etc/sysctl.d/10-ptrace.conf ...
+kernel.yama.ptrace_scope = 1
+* Applying /etc/sysctl.d/10-zeropage.conf ...
+vm.mmap_min_addr = 65536
+* Applying /usr/lib/sysctl.d/50-default.conf ...
+net.ipv4.conf.all.promote_secondaries = 1
+net.core.default_qdisc = fq_codel
+* Applying /etc/sysctl.d/99-sysctl.conf ...
+* Applying /etc/sysctl.d/k8s.conf ...
+net.bridge.bridge-nf-call-ip6tables = 1
+net.bridge.bridge-nf-call-iptables = 1
+* Applying /etc/sysctl.conf ...
+
+
+--------Il est important d'activer le firewall et établir les règles comme définir dans la doc
+Etant donné que nous sommes en environnment de test, on va le désactiver pour les besoins de 
+facilitation------
+
+root@master:~# ufw status      (pour voir le status du firewall)
+Status: inactive           (actuellement il est désactivé)
+
+root@master:~# ufw enable    (pour activer le firewall)
+
+root@master:~# ufw disable   (pour desactiver le firewall)
+
+
+
+
+-----Installation d'un runtime de container (docker) sur chaque noeud------
+
+root@master:~# apt-get update -y 
+
+root@master:~# apt-get install docker.io -y
+
+root@master:~# systemctl start docker
+
+root@master:~# systemctl enable docker
+
+root@master:~# systemctl status docker
+
+
+
+ou installer docker à l'aide d'un script conçu par docker
+
+$ curl -fsSL https://get.docker.com -o get-docker.sh
+$ sh get-docker.sh 
+
+
+
+---------Install de "kubeadm" sur chaque noeud--------
+
+
+root@master:~# sudo apt-get update && sudo apt-get install -y apt-transport-https curl
+
+
+root@master:~# curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo apt-key add -
+OK
+
+
+root@master:~# cat <<EOF | sudo tee /etc/apt/sources.list.d/kubernetes.list
+deb https://apt.kubernetes.io/ kubernetes-xenial main
+EOF
+deb https://apt.kubernetes.io/ kubernetes-xenial main
+
+
+root@master:~# sudo apt-get update
+
+root@master:~# sudo apt-get install -y kubelet=1.18.0-00  kubeadm=1.18.0-00  kubectl=1.18.0-00
+
+root@master:~# systemctl start kubelet
+
+root@master:~# systemctl enable kubelet
+
+root@master:~# systemctl status  kubelet
+
+
+
+-------------Configuration du cluster (Initialisation)-------
+
+Toujours dans la documentation "Using kubeadm to Create a Cluster"
+
+On va initialiser le cluster. 
+
+Attention!!! Attention!!! cette commande doit être exécuter uniquement sur le noeud "master"
+
+**pour le 1er paramètre "--pod-network-cidr=" (il faut utiliser un subnet qui est différent du subnet 
+de notre cluster. Ce subnet sera utiliser par les Pods donc il faut qu'il soit compatible avec le 
+subnet du CNI [flannel, weave-net, calico] qu'on va choisir)
+**pour le 2ème paramètre "--apiserver-advertise-address=ip-address" (ici il faut mettre l'@IP du 
+controle plane qui est le "master" --> 172.16.16.4
+
+
+root@master:~# kubeadm init --pod-network-cidr=192.168.0.0/16 --apiserver-advertise-address=172.16.16.4
+
+NB: cette commande va nous permettre de télécharger tous les composants du controle plane (kube-apiserver,
+kube-scheduler, kube-controller, etcd). il télécharge tous les conteneurs du controle plane.
+
+
+
+Your Kubernetes control-plane has initialized successfully!
+
+To start using your cluster, you need to run the following as a regular user:
+
+  mkdir -p $HOME/.kube
+  sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+  sudo chown $(id -u):$(id -g) $HOME/.kube/config
+
+You should now deploy a pod network to the cluster.
+Run "kubectl apply -f [podnetwork].yaml" with one of the options listed at:
+  https://kubernetes.io/docs/concepts/cluster-administration/addons/
+
+Then you can join any number of worker nodes by running the following on each as root:
+
+kubeadm join 172.16.16.4:6443 --token mql9xv.xh8b3myjhx9jdf6f \
+    --discovery-token-ca-cert-hash sha256:4f98cc9bd8ba3cc73f847b2d6ff7330d4edff85b23be94a55611340268f2e5a8
+
+
+root@master:~#  exit
+exit
+
+devops@master:~$ mkdir -p $HOME/.kube
+
+devops@master:~$ sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+[sudo] password for devops:
+
+devops@master:~$ sudo chown $(id -u):$(id -g) $HOME/.kube/config     (pour donner les droits au user
+                                                                      'devops') 
+
+
+devops@master:~$ kubectl get nodes              (pour voir l'etat du cluster, ici on voir qu'il est
+                                                 NotReady parce qu'on a pas encore installé notre CNI)
+NAME     STATUS     ROLES    AGE     VERSION
+master   NotReady   master   8m34s   v1.18.0
+
+
+devops@master:~$ sudo usermod -aG docker devops   (pour donner les droits du user "devops" sur docker)
+
+
+
+
+-------Install de CNI (Calico)----------
+
+On va faire une recherche sur google "install calico".
+Arrivez sur le site, choisissez "Self-managed on-premises" parce qu'on déploie en <<on-premises>>
+
+devops@master:~$ kubectl apply -f https://docs.projectcalico.org/manifests/calico.yaml
+
+configmap/calico-config created
+customresourcedefinition.apiextensions.k8s.io/bgpconfigurations.crd.projectcalico.org created
+customresourcedefinition.apiextensions.k8s.io/bgppeers.crd.projectcalico.org created
+customresourcedefinition.apiextensions.k8s.io/blockaffinities.crd.projectcalico.org created
+customresourcedefinition.apiextensions.k8s.io/clusterinformations.crd.projectcalico.org created
+customresourcedefinition.apiextensions.k8s.io/felixconfigurations.crd.projectcalico.org created
+customresourcedefinition.apiextensions.k8s.io/globalnetworkpolicies.crd.projectcalico.org created
+customresourcedefinition.apiextensions.k8s.io/globalnetworksets.crd.projectcalico.org created
+customresourcedefinition.apiextensions.k8s.io/hostendpoints.crd.projectcalico.org created
+customresourcedefinition.apiextensions.k8s.io/ipamblocks.crd.projectcalico.org created
+customresourcedefinition.apiextensions.k8s.io/ipamconfigs.crd.projectcalico.org created
+customresourcedefinition.apiextensions.k8s.io/ipamhandles.crd.projectcalico.org created
+customresourcedefinition.apiextensions.k8s.io/ippools.crd.projectcalico.org created
+customresourcedefinition.apiextensions.k8s.io/kubecontrollersconfigurations.crd.projectcalico.org created
+customresourcedefinition.apiextensions.k8s.io/networkpolicies.crd.projectcalico.org created
+customresourcedefinition.apiextensions.k8s.io/networksets.crd.projectcalico.org created
+clusterrole.rbac.authorization.k8s.io/calico-kube-controllers created
+clusterrolebinding.rbac.authorization.k8s.io/calico-kube-controllers created
+clusterrole.rbac.authorization.k8s.io/calico-node created
+clusterrolebinding.rbac.authorization.k8s.io/calico-node created
+daemonset.apps/calico-node created
+serviceaccount/calico-node created
+deployment.apps/calico-kube-controllers created
+serviceaccount/calico-kube-controllers created
+
+
+
+--------Jointure des "workers" au master------
+
+
+devops@master:~$ kubeadm token create --print-join-command   (au cas où vous avez oubliez de copier 
+                                                              la commande de jointure [token] qui se 
+                                                              génère après initialisation)
+                                                              
+
+W1109 18:50:14.348995    7704 configset.go:202] WARNING: kubeadm cannot validate component configs for API groups [kubelet.config.k8s.io kubeproxy.config.k8s.io]
+kubeadm join 172.16.16.4:6443 --token 0njz1p.q3ezl8h36foml23y     --discovery-token-ca-cert-hash sha256:4f98cc9bd8ba3cc73f847b2d6ff7330d4edff85b23be94a55611340268f2e5a8
+
+
+Exécutez la commande sur chaque "worker" ('node-01' et 'node-02') afin de rejoindre le cluster.
+
+root@node-01:~# kubeadm join 172.16.16.4:6443 --token 0njz1p.q3ezl8h36foml23y     --discovery-token-ca-cert-hash sha256:4f98cc9bd8ba3cc73f847b2d6ff7330d4edff85b23be94a55611340268f2e5a8
+
+
+root@node-02:~# kubeadm join 172.16.16.4:6443 --token 0njz1p.q3ezl8h36foml23y     --discovery-token-ca-cert-hash sha256:4f98cc9bd8ba3cc73f847b2d6ff7330d4edff85b23be94a55611340268f2e5a8
+
+
+
+
+----------Vérrification de l'etat du cluster kubernetes -------------
+
+
+devops@master:~$ kubectl get nodes              (pour voir l'état des noeuds à nouveau)
+NAME      STATUS     ROLES    AGE     VERSION
+master    Ready      master   26m     v1.18.0
+node-01   NotReady   <none>   2m47s   v1.18.0
+node-02   NotReady   <none>   2m36s   v1.18.0
+
+
+NB: Il faut patienter un tout petit peu afin les différents workers soient "Ready" car Calico 
+    entrain configurer le "réseau" sur les "workers".
+
+devops@master:~$ kubectl get nodes
+NAME      STATUS     ROLES    AGE     VERSION
+master    Ready      master   31m     v1.18.0
+node-01   NotReady   <none>   7m37s   v1.18.0
+node-02   NotReady   <none>   7m26s   v1.18.0
+
+
+devops@master:~$ kubectl get nodes -o wide
+NAME      STATUS     ROLES    AGE     VERSION   INTERNAL-IP   EXTERNAL-IP   OS-IMAGE           KERNEL-VERSION      CONTAINER-RUNTIME
+master    Ready      master   32m     v1.18.0   172.16.16.4   <none>        Ubuntu 18.04 LTS   4.15.0-20-generic   docker://19.3.6
+node-01   NotReady   <none>   8m6s    v1.18.0   172.16.16.5   <none>        Ubuntu 18.04 LTS   4.15.0-20-generic   docker://19.3.6
+node-02   NotReady   <none>   7m55s   v1.18.0   172.16.16.6   <none>        Ubuntu 18.04 LTS   4.15.0-20-generic   docker://19.3.6
+
+
+
+devops@master:~$ kubectl get nodes
+NAME      STATUS     ROLES    AGE   VERSION
+master    Ready      master   35m   v1.18.0
+node-01   Ready      <none>   10m   v1.18.0
+node-02   NotReady   <none>   10m   v1.18.0
+
+
+devops@master:~$ kubectl get pods -n kube-system
+NAME                                      READY   STATUS             RESTARTS   AGE
+calico-kube-controllers-676c4cbdf-vvr8w   1/1     Running            0          18m
+calico-node-4zjpz                         0/1     Init:2/3           0          10m
+calico-node-5zqjl                         1/1     Running            0          18m
+calico-node-wwgn5                         0/1     ImagePullBackOff   0          11m
+coredns-66bff467f8-d69dk                  1/1     Running            0          34m
+coredns-66bff467f8-kr5s6                  1/1     Running            0          34m
+etcd-master                               1/1     Running            0          35m
+kube-apiserver-master                     1/1     Running            0          35m
+kube-controller-manager-master            1/1     Running            0          35m
+kube-proxy-ct28q                          1/1     Running            0          11m
+kube-proxy-fd8rx                          1/1     Running            0          10m
+kube-proxy-mpk47                          1/1     Running            0          34m
+kube-scheduler-master                     1/1     Running            0          35m
+
+
+
+devops@master:~$ kubectl get nodes
+NAME      STATUS   ROLES    AGE   VERSION
+master    Ready    master   39m   v1.18.0
+node-01   Ready    <none>   15m   v1.18.0
+node-02   Ready    <none>   15m   v1.18.0
+
+
+devops@master:~$ kubectl get pods -n kube-system
+NAME                                      READY   STATUS    RESTARTS   AGE
+calico-kube-controllers-676c4cbdf-vvr8w   1/1     Running   0          39m
+calico-node-4zjpz                         1/1     Running   0          31m
+calico-node-5zqjl                         1/1     Running   0          39m
+calico-node-wwgn5                         1/1     Running   0          31m
+coredns-66bff467f8-d69dk                  1/1     Running   0          55m
+coredns-66bff467f8-kr5s6                  1/1     Running   0          55m
+etcd-master                               1/1     Running   0          55m
+kube-apiserver-master                     1/1     Running   0          55m
+kube-controller-manager-master            1/1     Running   0          55m
+kube-proxy-ct28q                          1/1     Running   0          31m
+kube-proxy-fd8rx                          1/1     Running   0          31m
+kube-proxy-mpk47                          1/1     Running   0          55m
+kube-scheduler-master                     1/1     Running   0          55m
+
+
+
+devops@master:~$ kubectl get pods -n kube-system -o wide
+NAME                                      READY   STATUS    RESTARTS   AGE   IP               NODE      NOMINATED NODE   READINESS GATES
+calico-kube-controllers-676c4cbdf-vvr8w   1/1     Running   1          14h   192.168.219.69   master    <none>           <none>
+calico-node-4zjpz                         1/1     Running   0          14h   172.16.16.6      node-02   <none>           <none>
+calico-node-5zqjl                         1/1     Running   1          14h   172.16.16.4      master    <none>           <none>
+calico-node-wwgn5                         1/1     Running   0          14h   172.16.16.5      node-01   <none>           <none>
+coredns-66bff467f8-d69dk                  1/1     Running   1          14h   192.168.219.70   master    <none>           <none>
+coredns-66bff467f8-kr5s6                  1/1     Running   1          14h   192.168.219.68   master    <none>           <none>
+etcd-master                               1/1     Running   1          14h   172.16.16.4      master    <none>           <none>
+kube-apiserver-master                     1/1     Running   1          14h   172.16.16.4      master    <none>           <none>
+kube-controller-manager-master            1/1     Running   1          14h   172.16.16.4      master    <none>           <none>
+kube-proxy-ct28q                          1/1     Running   0          14h   172.16.16.5      node-01   <none>           <none>
+kube-proxy-fd8rx                          1/1     Running   0          14h   172.16.16.6      node-02   <none>           <none>
+kube-proxy-mpk47                          1/1     Running   1          14h   172.16.16.4      master    <none>           <none>
+kube-scheduler-master                     1/1     Running   1          14h   172.16.16.4      master    <none>           <none>
+
+
+devops@master:~$ docker ps
+CONTAINER ID        IMAGE                  COMMAND                  CREATED             STATUS              PORTS               NAMES
+5451b62b4104        67da37a9a360           "/coredns -conf /etc…"   3 minutes ago       Up 3 minutes                            k8s_coredns_coredns-66bff467f8-d69dk_kube-system_43442717-0974-4e03-a857-8bec726542fd_1
+a6c0803502db        67da37a9a360           "/coredns -conf /etc…"   3 minutes ago       Up 3 minutes                            k8s_coredns_coredns-66bff467f8-kr5s6_kube-system_d4761319-3c4b-4cd6-a0e3-b620fb58fe4e_1
+680a85554ea7        1120bf0b8b41           "/usr/bin/kube-contr…"   3 minutes ago       Up 3 minutes                            k8s_calico-kube-controllers_calico-kube-controllers-676c4cbdf-vvr8w_kube-system_37637e81-be53-4985-85e9-4aab0449d58f_1
+de260b48ddd8        c1fa37765208           "start_runit"            3 minutes ago       Up 3 minutes                            k8s_calico-node_calico-node-5zqjl_kube-system_d6f99e6a-f38a-4185-b80e-ae8f27e74962_1
+5a49abae7047        k8s.gcr.io/pause:3.2   "/pause"                 4 minutes ago       Up 3 minutes                            k8s_POD_coredns-66bff467f8-d69dk_kube-system_43442717-0974-4e03-a857-8bec726542fd_62
+971b498bf670        k8s.gcr.io/pause:3.2   "/pause"                 4 minutes ago       Up 3 minutes                            k8s_POD_coredns-66bff467f8-kr5s6_kube-system_d4761319-3c4b-4cd6-a0e3-b620fb58fe4e_61
+2559e0b486b1        k8s.gcr.io/pause:3.2   "/pause"                 4 minutes ago       Up 3 minutes                            k8s_POD_calico-kube-controllers-676c4cbdf-vvr8w_kube-system_37637e81-be53-4985-85e9-4aab0449d58f_65
+de6362f651d0        2abfb19fb8ae           "/usr/local/bin/kube…"   4 minutes ago       Up 4 minutes                            k8s_kube-proxy_kube-proxy-mpk47_kube-system_cd1d0bdc-8114-439c-ab8e-3faad66c8a6e_1
+30057e8ce0ca        k8s.gcr.io/pause:3.2   "/pause"                 4 minutes ago       Up 4 minutes                            k8s_POD_calico-node-5zqjl_kube-system_d6f99e6a-f38a-4185-b80e-ae8f27e74962_1
+06f10a3bcb30        k8s.gcr.io/pause:3.2   "/pause"                 4 minutes ago       Up 4 minutes                            k8s_POD_kube-proxy-mpk47_kube-system_cd1d0bdc-8114-439c-ab8e-3faad66c8a6e_1
+5fe2155458e8        f23f5042d485           "kube-scheduler --au…"   5 minutes ago       Up 5 minutes                            k8s_kube-scheduler_kube-scheduler-master_kube-system_ec73ed295bd1189e820bbfa8454cad01_1
+44e723cf828f        303ce5db0e90           "etcd --advertise-cl…"   5 minutes ago       Up 5 minutes                            k8s_etcd_etcd-master_kube-system_b5af239b042da5575869152ed59bf7c4_1
+58dc63e3abc6        b52d2697baa9           "kube-controller-man…"   5 minutes ago       Up 5 minutes                            k8s_kube-controller-manager_kube-controller-manager-master_kube-system_889be9fe67dcc9a83114e40cbc1c7612_1
+7c4f16bc69bb        ab3c7c4901f3           "kube-apiserver --ad…"   5 minutes ago       Up 5 minutes                            k8s_kube-apiserver_kube-apiserver-master_kube-system_73ade57c36bbe409223d0ab94ab1826c_1
+5a03b0fcd5bf        k8s.gcr.io/pause:3.2   "/pause"                 5 minutes ago       Up 5 minutes                            k8s_POD_kube-scheduler-master_kube-system_ec73ed295bd1189e820bbfa8454cad01_1
+da03e98c3843        k8s.gcr.io/pause:3.2   "/pause"                 5 minutes ago       Up 5 minutes                            k8s_POD_kube-controller-manager-master_kube-system_889be9fe67dcc9a83114e40cbc1c7612_1
+bc1116df3252        k8s.gcr.io/pause:3.2   "/pause"                 5 minutes ago       Up 5 minutes                            k8s_POD_etcd-master_kube-system_b5af239b042da5575869152ed59bf7c4_1
+e9f1df8668d1        k8s.gcr.io/pause:3.2   "/pause"                 5 minutes ago       Up 5 minutes                            k8s_POD_kube-apiserver-master_kube-system_73ade57c36bbe409223d0ab94ab1826c_1
+
+
+devops@master:~$ docker images
+REPOSITORY                           TAG                 IMAGE ID            CREATED             SIZE
+calico/node                          v3.16.5             c1fa37765208        3 days ago          163MB
+calico/pod2daemon-flexvol            v3.16.5             178cfd5d2400        3 days ago          21.9MB
+calico/cni                           v3.16.5             9165569ec236        3 days ago          133MB
+calico/kube-controllers              v3.16.5             1120bf0b8b41        3 days ago          52.9MB
+k8s.gcr.io/kube-proxy                v1.18.10            2abfb19fb8ae        3 weeks ago         117MB
+k8s.gcr.io/kube-controller-manager   v1.18.10            b52d2697baa9        3 weeks ago         162MB
+k8s.gcr.io/kube-apiserver            v1.18.10            ab3c7c4901f3        3 weeks ago         173MB
+k8s.gcr.io/kube-scheduler            v1.18.10            f23f5042d485        3 weeks ago         95.3MB
+k8s.gcr.io/pause                     3.2                 80d28bedfe5d        8 months ago        683kB
+k8s.gcr.io/coredns                   1.6.7               67da37a9a360        9 months ago        43.8MB
+k8s.gcr.io/etcd                      3.4.3-0             303ce5db0e90        12 months ago       288MB
+
+
+
+root@node-01:~# docker ps
+CONTAINER ID        IMAGE                   COMMAND                  CREATED             STATUS              PORTS               NAMES
+f69f95f3da2d        nginx                   "/docker-entrypoint.…"   17 minutes ago      Up 17 minutes                           k8s_nginx_nginx_default_2ffdce0b-1099-47b6-8802-f925c172ce64_0
+9623093d7799        k8s.gcr.io/pause:3.2    "/pause"                 18 minutes ago      Up 18 minutes                           k8s_POD_nginx_default_2ffdce0b-1099-47b6-8802-f925c172ce64_5
+0377eb579c0a        calico/node             "start_runit"            18 minutes ago      Up 18 minutes                           k8s_calico-node_calico-node-k7msb_kube-system_1d3d12e2-af47-472b-a8f9-0c7929a52c39_0
+ae337b0ec596        k8s.gcr.io/kube-proxy   "/usr/local/bin/kube…"   20 minutes ago      Up 19 minutes                           k8s_kube-proxy_kube-proxy-6dknp_kube-system_7b449420-0a42-4757-8c94-fa84498c5fe1_0
+658846b64717        k8s.gcr.io/pause:3.2    "/pause"                 21 minutes ago      Up 21 minutes                           k8s_POD_calico-node-k7msb_kube-system_1d3d12e2-af47-472b-a8f9-0c7929a52c39_0
+ecf71db4971d        k8s.gcr.io/pause:3.2    "/pause"                 21 minutes ago      Up 21 minutes                           k8s_POD_kube-proxy-6dknp_kube-system_7b449420-0a42-4757-8c94-fa84498c5fe1_0
+
+
+
+root@node-02:~# docker ps
+CONTAINER ID        IMAGE                  COMMAND                  CREATED             STATUS              PORTS               NAMES
+5726525be34b        c1fa37765208           "start_runit"            6 minutes ago       Up 5 minutes                            k8s_calico-node_calico-node-b62l7_kube-system_fc872e6b-eb15-4865-8f3e-a21bb0712348_0
+1266c0c4cd30        2abfb19fb8ae           "/usr/local/bin/kube…"   8 minutes ago       Up 8 minutes                            k8s_kube-proxy_kube-proxy-fd8rx_kube-system_0ae8a1a1-540b-4957-8af5-bfefc4f6ad4d_1
+5f94a78df5ce        k8s.gcr.io/pause:3.2   "/pause"                 9 minutes ago       Up 8 minutes                            k8s_POD_kube-proxy-fd8rx_kube-system_0ae8a1a1-540b-4957-8af5-bfefc4f6ad4d_1
+947e8fedd23d        k8s.gcr.io/pause:3.2   "/pause"                 9 minutes ago       Up 8 minutes                            k8s_POD_calico-node-b62l7_kube-system_fc872e6b-eb15-4865-8f3e-a21bb0712348_0
+
+
+
+
+------------------------------DEPLOY CLUSTER ROOK CEPH-------------------------------
+
+
+
+devops@master:~$ git clone https://github.com/rook/rook.git
+
+Cloning into 'rook'...
+remote: Enumerating objects: 64484, done.
+remote: Total 64484 (delta 0), reused 0 (delta 0), pack-reused 64484
+Receiving objects: 100% (64484/64484), 37.02 MiB | 2.20 MiB/s, done.
+Resolving deltas: 100% (44593/44593), done.
+
+
+devops@master:~$ ls
+rook
+
+
+devops@master:~$ cd rook/
+
+
+devops@master:~/rook$ ls
+
+ADOPTERS.md  cmd                 CONTRIBUTING.md  Documentation  GOVERNANCE.md  Jenkinsfile  OWNERS.md               README.md    tests
+build        CODE_OF_CONDUCT.md  DCO              go.mod         images         LICENSE      PendingReleaseNotes.md  ROADMAP.md
+cluster      CODE-OWNERS         design           go.sum         INSTALL.md     Makefile     pkg                     SECURITY.md
+
+
+
+devops@master:~/rook$ cd cluster/examples/kubernetes/ceph/
+
+
+devops@master:~/rook/cluster/examples/kubernetes/ceph$ ls
+
+ceph-client.yaml                      dashboard-external-https.yaml    object-bucket-claim-retain.yaml   pool.yaml
+cluster-external-management.yaml      dashboard-external-http.yaml     object-ec.yaml                    pre-k8s-1.16
+cluster-external.yaml                 dashboard-ingress-https.yaml     object-external.yaml              rbdmirror.yaml
+cluster-on-pvc.yaml                   dashboard-loadbalancer.yaml      object-multisite-pull-realm.yaml  rgw-external.yaml
+cluster-stretched.yaml                direct-mount.yaml                object-multisite.yaml             scc.yaml
+cluster-test.yaml                     filesystem-ec.yaml               object-openshift.yaml             storageclass-bucket-delete.yaml
+cluster-with-drive-groups.yaml        filesystem-test.yaml             object-test.yaml                  storageclass-bucket-retain.yaml
+cluster.yaml                          filesystem.yaml                  object-user.yaml                  toolbox-job.yaml
+common-external.yaml                  flex                             object.yaml                       toolbox.yaml
+common.yaml                           import-external-cluster.sh       operator-openshift.yaml           upgrade-from-v1.3-apply.yaml
+config-admission-controller.sh        monitoring                       operator.yaml                     upgrade-from-v1.3-crds.yaml
+create-external-cluster-resources.py  nfs-test.yaml                    osd-purge.yaml                    upgrade-from-v1.3-delete.yaml
+create-external-cluster-resources.sh  nfs.yaml                         pool-ec.yaml                      upgrade-from-v1.4-apply.yaml
+csi                                   object-bucket-claim-delete.yaml  pool-test.yaml                    upgrade-from-v1.4-crds.yaml
+
+
+----------configuration de rook et ceph---------
+
+
+devops@master:~/rook/cluster/examples/kubernetes/ceph$ vi common.yaml 
+
+devops@master:~/rook/cluster/examples/kubernetes/ceph$ vi operator.yaml
+
+
+devops@master:~/rook/cluster/examples/kubernetes/ceph$ vi cluster.yaml
+
+43     count: 3
+44     # The mons should be on unique nodes. For production, at least 3 nodes are recommended for this reason.
+45     # Mons should only be allowed on the same node for test environments where data loss is acceptable.
+46     allowMultiplePerNode: true
+
+
+63   monitoring:
+64     # requires Prometheus to be pre-installed
+65     enabled: true       (decommentez cette ligne et mettez "true")
+
+
+180   storage: # cluster level storage configuration and selection
+181     useAllNodes: false        (decommentez cette ligne et mettez "false")
+182     useAllDevices: true
+183     deviceFilter:
+184     config:
+
+
+
+193     nodes:
+194     - name: "node-01"
+195       devices: # specific devices to use for storage can be specified for each node
+196       - name: "sdb"
+197       - name: "sdc"
+198
+199      - name: "node-02"
+200        devices: # specific devices to use for storage can be specified for each node
+201        - name: "sdb"
+202        - name: "sdc"
+203
+204 #     - name: "node-03"
+205 #      devices: # specific devices to use for storage can be specified for each node
+206 #       - name: "sdb"
+207 #       - name: "sdc"
+208
+
+
+
+
+devops@master:~/rook/cluster/examples/kubernetes/ceph$ sudo fdisk -l
+[sudo] password for devops:
+Disk /dev/loop0: 86.6 MiB, 90759168 bytes, 177264 sectors
+Units: sectors of 1 * 512 = 512 bytes
+Sector size (logical/physical): 512 bytes / 512 bytes
+I/O size (minimum/optimal): 512 bytes / 512 bytes
+
+Disk /dev/loop1: 97.8 MiB, 102486016 bytes, 200168 sectors
+Units: sectors of 1 * 512 = 512 bytes
+Sector size (logical/physical): 512 bytes / 512 bytes
+I/O size (minimum/optimal): 512 bytes / 512 bytes
+
+Disk /dev/sda: 30 GiB, 32212254720 bytes, 62914560 sectors
+Units: sectors of 1 * 512 = 512 bytes
+Sector size (logical/physical): 512 bytes / 512 bytes
+I/O size (minimum/optimal): 512 bytes / 512 bytes
+Disklabel type: gpt
+Disk identifier: 5637DE59-26C0-4540-A54D-D81DBEAB937A
+
+Device     Start      End  Sectors Size Type
+/dev/sda1   2048     4095     2048   1M BIOS boot
+/dev/sda2   4096 62912511 62908416  30G Linux filesystem
+
+
+Disk /dev/sdb: 20 GiB, 21474836480 bytes, 41943040 sectors
+Units: sectors of 1 * 512 = 512 bytes
+Sector size (logical/physical): 512 bytes / 512 bytes
+I/O size (minimum/optimal): 512 bytes / 512 bytes
+
+
+Disk /dev/sdc: 20 GiB, 21474836480 bytes, 41943040 sectors
+Units: sectors of 1 * 512 = 512 bytes
+Sector size (logical/physical): 512 bytes / 512 bytes
+I/O size (minimum/optimal): 512 bytes / 512 bytes
+
+
+
+--------deploiement de l'operator "rook"----------
+
+
+devops@master:~/rook/cluster/examples/kubernetes/ceph$ kubectl create -f common.yaml
+
+namespace/rook-ceph created
+customresourcedefinition.apiextensions.k8s.io/cephclusters.ceph.rook.io created
+customresourcedefinition.apiextensions.k8s.io/cephclients.ceph.rook.io created
+customresourcedefinition.apiextensions.k8s.io/cephrbdmirrors.ceph.rook.io created
+customresourcedefinition.apiextensions.k8s.io/cephfilesystems.ceph.rook.io created
+customresourcedefinition.apiextensions.k8s.io/cephnfses.ceph.rook.io created
+customresourcedefinition.apiextensions.k8s.io/cephobjectstores.ceph.rook.io created
+customresourcedefinition.apiextensions.k8s.io/cephobjectstoreusers.ceph.rook.io created
+customresourcedefinition.apiextensions.k8s.io/cephobjectrealms.ceph.rook.io created
+customresourcedefinition.apiextensions.k8s.io/cephobjectzonegroups.ceph.rook.io created
+customresourcedefinition.apiextensions.k8s.io/cephobjectzones.ceph.rook.io created
+customresourcedefinition.apiextensions.k8s.io/cephblockpools.ceph.rook.io created
+customresourcedefinition.apiextensions.k8s.io/volumes.rook.io created
+customresourcedefinition.apiextensions.k8s.io/objectbuckets.objectbucket.io created
+customresourcedefinition.apiextensions.k8s.io/objectbucketclaims.objectbucket.io created
+clusterrolebinding.rbac.authorization.k8s.io/rook-ceph-object-bucket created
+serviceaccount/rook-ceph-admission-controller created
+clusterrole.rbac.authorization.k8s.io/rook-ceph-admission-controller-role created
+clusterrolebinding.rbac.authorization.k8s.io/rook-ceph-admission-controller-rolebinding created
+clusterrole.rbac.authorization.k8s.io/rook-ceph-cluster-mgmt created
+role.rbac.authorization.k8s.io/rook-ceph-system created
+clusterrole.rbac.authorization.k8s.io/rook-ceph-global created
+clusterrole.rbac.authorization.k8s.io/rook-ceph-mgr-cluster created
+clusterrole.rbac.authorization.k8s.io/rook-ceph-object-bucket created
+serviceaccount/rook-ceph-system created
+rolebinding.rbac.authorization.k8s.io/rook-ceph-system created
+clusterrolebinding.rbac.authorization.k8s.io/rook-ceph-global created
+serviceaccount/rook-ceph-osd created
+serviceaccount/rook-ceph-mgr created
+serviceaccount/rook-ceph-cmd-reporter created
+role.rbac.authorization.k8s.io/rook-ceph-osd created
+clusterrole.rbac.authorization.k8s.io/rook-ceph-osd created
+clusterrole.rbac.authorization.k8s.io/rook-ceph-mgr-system created
+role.rbac.authorization.k8s.io/rook-ceph-mgr created
+role.rbac.authorization.k8s.io/rook-ceph-cmd-reporter created
+rolebinding.rbac.authorization.k8s.io/rook-ceph-cluster-mgmt created
+rolebinding.rbac.authorization.k8s.io/rook-ceph-osd created
+rolebinding.rbac.authorization.k8s.io/rook-ceph-mgr created
+rolebinding.rbac.authorization.k8s.io/rook-ceph-mgr-system created
+clusterrolebinding.rbac.authorization.k8s.io/rook-ceph-mgr-cluster created
+clusterrolebinding.rbac.authorization.k8s.io/rook-ceph-osd created
+rolebinding.rbac.authorization.k8s.io/rook-ceph-cmd-reporter created
+podsecuritypolicy.policy/00-rook-privileged created
+clusterrole.rbac.authorization.k8s.io/psp:rook created
+clusterrolebinding.rbac.authorization.k8s.io/rook-ceph-system-psp created
+rolebinding.rbac.authorization.k8s.io/rook-ceph-default-psp created
+rolebinding.rbac.authorization.k8s.io/rook-ceph-osd-psp created
+rolebinding.rbac.authorization.k8s.io/rook-ceph-mgr-psp created
+rolebinding.rbac.authorization.k8s.io/rook-ceph-cmd-reporter-psp created
+serviceaccount/rook-csi-cephfs-plugin-sa created
+serviceaccount/rook-csi-cephfs-provisioner-sa created
+role.rbac.authorization.k8s.io/cephfs-external-provisioner-cfg created
+rolebinding.rbac.authorization.k8s.io/cephfs-csi-provisioner-role-cfg created
+clusterrole.rbac.authorization.k8s.io/cephfs-csi-nodeplugin created
+clusterrole.rbac.authorization.k8s.io/cephfs-external-provisioner-runner created
+clusterrolebinding.rbac.authorization.k8s.io/rook-csi-cephfs-plugin-sa-psp created
+clusterrolebinding.rbac.authorization.k8s.io/rook-csi-cephfs-provisioner-sa-psp created
+clusterrolebinding.rbac.authorization.k8s.io/cephfs-csi-nodeplugin created
+clusterrolebinding.rbac.authorization.k8s.io/cephfs-csi-provisioner-role created
+serviceaccount/rook-csi-rbd-plugin-sa created
+serviceaccount/rook-csi-rbd-provisioner-sa created
+role.rbac.authorization.k8s.io/rbd-external-provisioner-cfg created
+rolebinding.rbac.authorization.k8s.io/rbd-csi-provisioner-role-cfg created
+clusterrole.rbac.authorization.k8s.io/rbd-csi-nodeplugin created
+clusterrole.rbac.authorization.k8s.io/rbd-external-provisioner-runner created
+clusterrolebinding.rbac.authorization.k8s.io/rook-csi-rbd-plugin-sa-psp created
+clusterrolebinding.rbac.authorization.k8s.io/rook-csi-rbd-provisioner-sa-psp created
+clusterrolebinding.rbac.authorization.k8s.io/rbd-csi-nodeplugin created
+clusterrolebinding.rbac.authorization.k8s.io/rbd-csi-provisioner-role created
+
+
+
+devops@master:~/rook/cluster/examples/kubernetes/ceph$ kubectl create -f operator.yaml
+
+configmap/rook-ceph-operator-config created
+deployment.apps/rook-ceph-operator created
+
+
+
+------------deploiement de cluster ceph----------
+
+devops@master:~/rook/cluster/examples/kubernetes/ceph$ kubectl create -f cluster.yaml
+cephcluster.ceph.rook.io/rook-ceph created
+
+
+
+-------création d'une classe de stockage (storageclass) ----
+
+devops@master:~/rook/cluster/examples/kubernetes/ceph/csi/rbd$ kubectl apply -f storageclass.yaml
+cephblockpool.ceph.rook.io/replicapool created
+storageclass.storage.k8s.io/rook-ceph-block created
+
+
+
+devops@master:~/rook/cluster/examples/kubernetes/ceph/csi/rbd$ kubectl get sc -n rook-ceph
+
+NAME              PROVISIONER                  RECLAIMPOLICY   VOLUMEBINDINGMODE   ALLOWVOLUMEEXPANSION   AGE
+rook-ceph-block   rook-ceph.rbd.csi.ceph.com   Delete          Immediate           true                   3m52s
+
+
+devops@master:~/rook/cluster/examples/kubernetes/ceph/csi/rbd$ kubectl get CephBlockPool -n rook-ceph
+NAME          AGE
+replicapool   6m14s
+
+
+-------------Installation du pod (outil) d'administration du cluster-------------
+
+devops@master:~/rook/cluster/examples/kubernetes/ceph$ kubectl apply -f toolbox.yaml
+deployment.apps/rook-ceph-tools created
+
+
+
+
+
+devops@master:~$ kubectl get pod -n rook-ceph
+NAME                                                READY   STATUS      RESTARTS   AGE
+csi-cephfsplugin-dpznp                              3/3     Running     22         47h
+csi-cephfsplugin-provisioner-8444995596-phhtq       6/6     Running     34         5h13m
+csi-cephfsplugin-provisioner-8444995596-v58hk       6/6     Running     22         3h2m
+csi-cephfsplugin-tq8sk                              3/3     Running     18         47h
+csi-rbdplugin-lgwqt                                 3/3     Running     15         47h
+csi-rbdplugin-m8wnt                                 3/3     Running     20         47h
+csi-rbdplugin-provisioner-65f85f795c-29rjm          6/6     Running     23         69m
+csi-rbdplugin-provisioner-65f85f795c-kmclt          6/6     Running     35         5h13m
+rook-ceph-crashcollector-node-01-8685db76df-9pf7d   1/1     Running     1          5h13m
+rook-ceph-crashcollector-node-02-744955c9bd-g6rth   1/1     Running     0          69m
+rook-ceph-mgr-a-7ddcdbd757-2hhvr                    1/1     Running     10         73m
+rook-ceph-mon-a-5dcf8fc9c-qbxzg                     1/1     Running     0          69m
+rook-ceph-mon-d-6cc4d5bbd4-dzn5d                    1/1     Running     1          5h13m
+rook-ceph-mon-f-59b6c58d95-8585q                    1/1     Running     0          69m
+rook-ceph-operator-5566d568cb-zcl7q                 1/1     Running     1          3h2m
+rook-ceph-osd-0-9877d7fbb-rkd92                     1/1     Running     9          5h13m
+rook-ceph-osd-1-5df888749d-k5vqj                    1/1     Running     0          69m
+rook-ceph-osd-prepare-node-01-fkvwr                 0/1     Completed   0          20m
+rook-ceph-osd-prepare-node-02-5rh4z                 0/1     Completed   0          20m
+rook-ceph-tools-6b4889fdfd-h4ljm                    1/1     Running     0          73m
+
+
+
+devops@master:~$ kubectl get pod -n rook-ceph -o wide
+NAME                                                READY   STATUS      RESTARTS   AGE     IP               NODE      NOMINATED NODE   READINESS GATES
+csi-cephfsplugin-dpznp                              3/3     Running     22         47h     172.16.16.5      node-01   <none>           <none>
+csi-cephfsplugin-provisioner-8444995596-phhtq       6/6     Running     34         5h34m   192.168.190.3    node-01   <none>           <none>
+csi-cephfsplugin-provisioner-8444995596-v58hk       6/6     Running     26         3h23m   192.168.184.26   node-02   <none>           <none>
+csi-cephfsplugin-tq8sk                              3/3     Running     18         47h     172.16.16.6      node-02   <none>           <none>
+csi-rbdplugin-lgwqt                                 3/3     Running     15         47h     172.16.16.6      node-02   <none>           <none>
+csi-rbdplugin-m8wnt                                 3/3     Running     20         47h     172.16.16.5      node-01   <none>           <none>
+csi-rbdplugin-provisioner-65f85f795c-29rjm          6/6     Running     26         89m     192.168.184.22   node-02   <none>           <none>
+csi-rbdplugin-provisioner-65f85f795c-kmclt          6/6     Running     37         5h34m   192.168.190.6    node-01   <none>           <none>
+rook-ceph-crashcollector-node-01-8685db76df-9pf7d   1/1     Running     1          5h34m   192.168.190.12   node-01   <none>           <none>
+rook-ceph-crashcollector-node-02-744955c9bd-g6rth   1/1     Running     0          89m     192.168.184.25   node-02   <none>           <none>
+rook-ceph-mgr-a-7ddcdbd757-2hhvr                    1/1     Running     14         94m     192.168.190.2    node-01   <none>           <none>
+rook-ceph-mon-a-5dcf8fc9c-qbxzg                     1/1     Running     0          89m     192.168.184.24   node-02   <none>           <none>
+rook-ceph-mon-d-6cc4d5bbd4-dzn5d                    1/1     Running     1          5h34m   192.168.190.7    node-01   <none>           <none>
+rook-ceph-mon-f-59b6c58d95-8585q                    1/1     Running     0          89m     192.168.184.23   node-02   <none>           <none>
+rook-ceph-operator-5566d568cb-zcl7q                 1/1     Running     1          3h23m   192.168.190.11   node-01   <none>           <none>
+rook-ceph-osd-0-9877d7fbb-rkd92                     1/1     Running     9          5h34m   192.168.190.8    node-01   <none>           <none>
+rook-ceph-osd-1-5df888749d-k5vqj                    1/1     Running     0          89m     192.168.184.21   node-02   <none>           <none>
+rook-ceph-osd-prepare-node-01-fkvwr                 0/1     Completed   0          40m     192.168.190.21   node-01   <none>           <none>
+rook-ceph-osd-prepare-node-02-5rh4z                 0/1     Completed   0          40m     192.168.184.31   node-02   <none>           <none>
+rook-ceph-tools-6b4889fdfd-h4ljm                    1/1     Running     0          94m     192.168.190.1    node-01   <none>           <none>
+
+
+
+Nous allons entrer dans le pod d'administration du cluster pour vérifier si ceph s'est bien installer
+
+
+devops@master:~$ kubectl -n rook-ceph exec -it rook-ceph-tools-6b4889fdfd-dppl2 bash
+kubectl exec [POD] [COMMAND] is DEPRECATED and will be removed in a future version. Use kubectl kubectl exec [POD] -- [COMMAND] instead.
+[root@rook-ceph-tools-6b4889fdfd-dppl2 /]# ceph -s
+  cluster:
+    id:     6f1f52ca-7488-4d61-97db-d5dbb65f4b4c
+    health: HEALTH_WARN
+            no active mgr
+            clock skew detected on mon.d
+            Reduced data availability: 33 pgs inactive
+            Degraded data redundancy: 4/6 objects degraded (66.667%), 1 pg degraded, 33 pgs undersized
+            OSD count 2 < osd_pool_default_size 3
+
+  services:
+    mon: 3 daemons, quorum a,d,f (age 6m)
+    mgr: no daemons active (since 2m)
+    osd: 2 osds: 2 up (since 7m), 2 in (since 20h)
+
+  data:
+    pools:   2 pools, 33 pgs
+    objects: 2 objects, 0 B
+    usage:   1.0 GiB used, 19 GiB / 20 GiB avail
+    pgs:     100.000% pgs not active
+             4/6 objects degraded (66.667%)
+             32 undersized+peered
+             1  undersized+degraded+peered
+
+
+[root@rook-ceph-tools-6b4889fdfd-h4ljm /]# ceph df
+--- RAW STORAGE ---
+CLASS  SIZE    AVAIL   USED    RAW USED  %RAW USED
+hdd    40 GiB  38 GiB  27 MiB   2.0 GiB       5.07
+TOTAL  40 GiB  38 GiB  27 MiB   2.0 GiB       5.07
+
+--- POOLS ---
+POOL                   ID  STORED   OBJECTS  USED     %USED  MAX AVAIL
+device_health_metrics   1  8.9 KiB        2   18 KiB      0     18 GiB
+replicapool             2  1.3 MiB       23  4.5 MiB   0.01     18 GiB
+
+
+[root@rook-ceph-tools-6b4889fdfd-h4ljm /]# ceph version
+ceph version 15.2.5 (2c93eff00150f0cc5f106a559557a58d3d7b6f1f) octopus (stable)
+
+[root@rook-ceph-tools-6b4889fdfd-h4ljm /]# exit
+exit
+devops@master:~$
+
+
+
+----------Nous allons créer notre Persistent Volume de manière dynamique en utilisant notre (storage
+ class) afin de fournir du volume aux différents pods qu'on va créer à la suite---------
+ 
+
+devops@master:~$ kubectl get sc -n rook-ceph
+NAME              PROVISIONER                  RECLAIMPOLICY   VOLUMEBINDINGMODE   ALLOWVOLUMEEXPANSION   AGE
+rook-ceph-block   rook-ceph.rbd.csi.ceph.com   Delete          Immediate           true                   20h
+
+
+devops@master:~$ kubectl get pv  -n rook-ceph
+No resources found in rook-ceph namespace.
+
+
+devops@master:~$ kubectl get pvc  -n rook-ceph
+No resources found in rook-ceph namespace.
+
+
+-------------Création de PVC--------- 
+
+devops@master:~$ cat pvc.yaml
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: rbd-pvc
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: rook-ceph-block
+
+
+----------Création de POD--------      
+
+devops@master:~$ cat pod.yaml
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: csirbd-demo-pod
+spec:
+  containers:
+   - name: web-server
+     image: nginx
+     volumeMounts:
+       - name: mypvc
+         mountPath: /var/lib/www/html
+  volumes:
+   - name: mypvc
+     persistentVolumeClaim:
+       claimName: rbd-pvc
+       readOnly: false
+
+
+devops@master:~$ kubectl apply -f pvc.yaml
+persistentvolumeclaim/rbd-pvc created
+
+
+
+devops@master:~$ kubectl get pvc
+NAME      STATUS   VOLUME                                     CAPACITY   ACCESS MODES   STORAGECLASS      AGE
+rbd-pvc   Bound    pvc-0258dde2-6073-491c-8574-2a57034c156f   1Gi        RWO            rook-ceph-block   22s
+
+
+devops@master:~$ kubectl get pv
+NAME                                       CAPACITY   ACCESS MODES   RECLAIM POLICY   STATUS   CLAIM             STORAGECLASS      REASON   AGE
+pvc-0258dde2-6073-491c-8574-2a57034c156f   1Gi        RWO            Delete           Bound    default/rbd-pvc   rook-ceph-block            27s
+
+
+
+devops@master:~$ kubectl apply -f pod.yaml
+pod/csirbd-demo-pod created
+
+
+devops@master:~$ kubectl get pod
+NAME              READY   STATUS              RESTARTS   AGE
+csirbd-demo-pod   0/1     ContainerCreating   0          68s
+
+
+devops@master:~$ kubectl get pod
+NAME              READY   STATUS    RESTARTS   AGE
+csirbd-demo-pod   1/1     Running   0          3m22s
+
+
+devops@master:~$ kubectl get pod -o wide
+NAME              READY   STATUS    RESTARTS   AGE     IP               NODE      NOMINATED NODE   READINESS GATES
+csirbd-demo-pod   1/1     Running   0          3m47s   192.168.190.59   node-01   <none>           <none>
+
+
+
+-------verification SC, PV, PVC, POD-------
+
+
+devops@master:~$ kubectl get sc -n rook-ceph
+NAME              PROVISIONER                  RECLAIMPOLICY   VOLUMEBINDINGMODE   ALLOWVOLUMEEXPANSION   AGE
+rook-ceph-block   rook-ceph.rbd.csi.ceph.com   Delete          Immediate           true                   20h
+
+
+devops@master:~$ kubectl get pv
+NAME                                       CAPACITY   ACCESS MODES   RECLAIM POLICY   STATUS   CLAIM             STORAGECLASS      REASON   AGE
+pvc-0258dde2-6073-491c-8574-2a57034c156f   1Gi        RWO            Delete           Bound    default/rbd-pvc   rook-ceph-block            27m
+
+
+devops@master:~$ kubectl get pvc
+NAME      STATUS   VOLUME                                     CAPACITY   ACCESS MODES   STORAGECLASS      AGE
+rbd-pvc   Bound    pvc-0258dde2-6073-491c-8574-2a57034c156f   1Gi        RWO            rook-ceph-block   28m
+
+
+devops@master:~$ kubectl get pod
+NAME              READY   STATUS    RESTARTS   AGE
+csirbd-demo-pod   1/1     Running   0          6m30s
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
